@@ -9,6 +9,7 @@ def run_simulation(T, market, firms, delivery_times):
     N = market.N
     prices_history = np.zeros((T, N))
     profits_history = np.zeros((T, N))
+    demand_history = np.zeros((T, N)) 
     equilibrium = Equilibrium(market, firms)
     
     for t in range(T):
@@ -23,25 +24,26 @@ def run_simulation(T, market, firms, delivery_times):
                 # Ensure action index is within bounds
                 action_index = int(equilibrium_prices[i] * firm.action_size / 
                                  (market.demand.alpha / market.demand.beta))
-                action_index = min(action_index, firm.action_size - 1)  # Ensure we don't exceed action_size
-                action_index = max(0, action_index)  # Ensure we don't go below 0
+                action_index = min(action_index, firm.action_size - 1)
+                action_index = max(0, action_index)
                 
                 firm.train(state, action_index, profits[i], next_state, t == T-1)
         
         prices_history[t] = equilibrium_prices
         profits_history[t] = profits
+        demand_history[t] = equilibrium_demands 
     
-    return prices_history, profits_history
+    return prices_history, profits_history, demand_history
 
-def plot_results(prices_history, profits_history, firm_types):
+def plot_results(prices_history, profits_history, demand_history, firm_types):
     T, N = prices_history.shape
     
     # Set the style
     sns.set_style("whitegrid")
     sns.set_palette("husl")
     
-    # Create figure
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 14))
+    # Create figure with three subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 18))
     
     # Convert data to long format for seaborn
     time_points = np.arange(T)
@@ -68,6 +70,17 @@ def plot_results(prices_history, profits_history, firm_types):
             })
     profits_df = pd.DataFrame(profits_data)
     
+    # Prepare data for demands plot
+    demand_data = []
+    for i in range(N):
+        for t in range(T):
+            demand_data.append({
+                'Time': t,
+                'Demand': demand_history[t, i],
+                'Firm Type': firm_types[i]
+            })
+    demand_df = pd.DataFrame(demand_data)
+    
     # Plot prices
     sns.lineplot(data=prices_df, x='Time', y='Price', hue='Firm Type', ax=ax1)
     ax1.set_title('Price Dynamics', pad=20, fontsize=14)
@@ -79,6 +92,12 @@ def plot_results(prices_history, profits_history, firm_types):
     ax2.set_title('Profit Dynamics', pad=20, fontsize=14)
     ax2.set_xlabel('Time', fontsize=12)
     ax2.set_ylabel('Profit', fontsize=12)
+    
+    # Plot demands
+    sns.lineplot(data=demand_df, x='Time', y='Demand', hue='Firm Type', ax=ax3)
+    ax3.set_title('Demand Dynamics', pad=20, fontsize=14)
+    ax3.set_xlabel('Time', fontsize=12)
+    ax3.set_ylabel('Demand', fontsize=12)
     
     # Adjust layout and styling
     plt.tight_layout()

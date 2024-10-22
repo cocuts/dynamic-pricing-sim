@@ -8,7 +8,6 @@ from .base_firm import BaseFirm
 
 @dataclass
 class RLHyperParams:
-    """Hyperparameters for RL agent configuration"""
     learning_rate: float = 0.001
     gamma: float = 0.95        # discount rate
     epsilon: float = 1.0       # initial exploration rate
@@ -21,25 +20,13 @@ class RLHyperParams:
 class DQN(nn.Module):
     def __init__(self, state_size: int, action_size: int, params: RLHyperParams):
         super(DQN, self).__init__()
-        layers = []
-        
-        # Input layer
-        layers.append(nn.Linear(state_size, params.hidden_size))
-        if params.batch_norm:
-            layers.append(nn.BatchNorm1d(params.hidden_size))
-        layers.append(nn.ReLU())
-        
-        # Hidden layers
-        for _ in range(params.n_hidden_layers - 1):
-            layers.append(nn.Linear(params.hidden_size, params.hidden_size))
-            if params.batch_norm:
-                layers.append(nn.BatchNorm1d(params.hidden_size))
-            layers.append(nn.ReLU())
-            
-        # Output layer
-        layers.append(nn.Linear(params.hidden_size, action_size))
-        
-        self.network = nn.Sequential(*layers)
+        self.network = nn.Sequential(
+            nn.Linear(state_size, params.hidden_size),
+            nn.ReLU(),
+            nn.Linear(params.hidden_size, params.hidden_size),
+            nn.ReLU(),
+            nn.Linear(params.hidden_size, action_size)
+        )
 
     def forward(self, x):
         return self.network(x)
@@ -51,85 +38,97 @@ class RLFirm(BaseFirm):
                  cost: float,
                  market: Optional = None,
                  hyperparams: Optional[RLHyperParams] = None):
-        """
-        Initialize RL-based firm
-        
-        Args:
-            state_size: Dimension of state space
-            action_size: Number of discrete actions
-            cost: Production cost
-            market: Optional market object for accessing demand parameters
-            hyperparams: Optional hyperparameters, uses defaults if None
-        """
         super().__init__(cost)
         self.state_size = state_size
         self.action_size = action_size
         self.market = market
-        
-        # Use provided hyperparams or defaults
         self.params = hyperparams if hyperparams is not None else RLHyperParams()
         
-        # Initialize DQN and training components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = DQN(state_size, action_size, self.params).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.params.learning_rate)
         
-        # Initialize exploration parameters
         self.epsilon = self.params.epsilon
         self.epsilon_min = self.params.epsilon_min
         self.epsilon_decay = self.params.epsilon_decay
-        self.gamma = self.params.gamma
-
-    def set_price(self, state):
-        if np.random.rand() <= self.epsilon:
-            return np.random.randint(self.action_size)
         
-        with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).to(self.device)
-            act_values = self.model(state_tensor)
-            return int(torch.argmax(act_values[0]).cpu().numpy())
+        self.min_price = cost * (1 + self.params.min_markup_pct)
+        self.last_price = self.min_price  # Initialize at minimum viable price
+        self.last_profit = 0
+        self.total_profits = []
 
-    def optimal_price(self, prices, demands, firm_index):
-        state = np.array([0] + list(prices) + [0] * (self.state_size - len(prices) - 1)).reshape(1, -1)
-        action = self.set_price(state)
+    def action_to_price(self, action: int, competitor_prices: np.ndarray) -> float:
+        """Convert discrete action to price with guaranteed minimum markup"""
+        # Ensure action is valid
+        action = max(0, min(action, self.action_size - 1))
         
-        # If market is provided, use its parameters for price bounds
+        # Determine price bounds
         if self.market:
             max_price = self.market.demand.alpha / self.market.demand.beta
         else:
-            max_price = np.max(prices) if len(prices) > 0 else 100
+            max_price = max(np.max(competitor_prices) * 2, self.cost * 2) if len(competitor_prices) > 0 else self.cost * 2
+        
+        # Convert action to markup percentage (minimum markup_pct to 100%)
+        markup_pct = self.params.min_markup_pct + (action / self.action_size) * (1.0 - self.params.min_markup_pct)
+        
+        # Calculate price ensuring it's between min_price and max_price
+        price = self.cost * (1 + markup_pct)
+        return min(max(price, self.min_price), max_price)
+
+    def set_price(self, state):
+        if np.random.rand() <= self.epsilon:
+            # Random action but constrained to produce valid markup
+            return np.random.randint(self.action_size)
+        
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).reshape(1, -1).to(self.device)
+            act_values = self.model(state_tensor)
+            # Mask out actions that would lead to prices below minimum
+            min_action = int(self.params.min_markup_pct * self.action_size)
+            act_values[0][:min_action] = float('-inf')
+            return int(torch.argmax(act_values[0]).cpu().numpy())
+
+    def optimal_price(self, prices, demands, firm_index):
+        # Create state vector matching the expected size
+        state = np.zeros(self.state_size)
+        state[0] = 0  # time placeholder
+        state[1:len(prices)+1] = prices
+        if len(prices) + 1 < len(state):
+            state[len(prices)+1:] = 0
             
-        return action / self.action_size * (max_price - self.cost) + self.cost
+        action = self.set_price(state.reshape(1, -1))
+        price = self.action_to_price(action, prices)
+        
+        self.last_price = price
+        return price
 
     def train(self, state, action, reward, next_state, done):
+        self.last_profit = reward
+        self.total_profits.append(reward)
+        
         self.model.train()
         
-        # Bound action to valid range
-        action = min(max(action, 0), self.action_size - 1)
-        
-        # Convert to tensors
-        state_tensor = torch.FloatTensor(state).to(self.device)
-        next_state_tensor = torch.FloatTensor(next_state).to(self.device)
+        state_tensor = torch.FloatTensor(state).reshape(1, -1).to(self.device)
+        next_state_tensor = torch.FloatTensor(next_state).reshape(1, -1).to(self.device)
         reward_tensor = torch.FloatTensor([reward]).to(self.device)
         
-        # Calculate target Q-value
-        with torch.no_grad():
-            if not done:
-                target = reward + self.gamma * torch.max(self.model(next_state_tensor)[0])
-            else:
-                target = reward_tensor
-
-        # Update Q-values
+        # Using immediate rewards only (gamma = 0)
+        target = reward_tensor
+        
         current_q_values = self.model(state_tensor)
         target_q_values = current_q_values.clone()
         target_q_values[0][action] = target
 
-        # Compute loss and update weights
         self.optimizer.zero_grad()
         loss = nn.MSELoss()(current_q_values, target_q_values)
         loss.backward()
         self.optimizer.step()
 
-        # Update epsilon
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
+            
+        if len(self.total_profits) % 100 == 0:
+            recent_profits = self.total_profits[-100:]
+            print(f"Recent avg profit: {np.mean(recent_profits):.2f}, "
+                  f"Last price: {self.last_price:.2f}, "
+                  f"Last profit: {self.last_profit:.2f}")
