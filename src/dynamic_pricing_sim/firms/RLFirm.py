@@ -9,13 +9,13 @@ from .base_firm import BaseFirm
 @dataclass
 class RLHyperParams:
     learning_rate: float = 0.001
-    gamma: float = 0.95        # discount rate
-    epsilon: float = 1.0       # initial exploration rate
-    epsilon_min: float = 0.01  # minimum exploration rate
-    epsilon_decay: float = 0.995 # exploration decay rate
-    hidden_size: int = 24      # size of hidden layers
-    batch_norm: bool = False   # whether to use batch normalization
-    n_hidden_layers: int = 2   # number of hidden layers
+    gamma: float = 0.0  # Focus on immediate rewards
+    epsilon: float = 1
+    epsilon_min: float = 0.01
+    epsilon_decay: float = 0.995
+    hidden_size: int = 24
+    n_hidden_layers: int = 2
+    min_markup_pct: float = 0.05  # Minimum markup percentage over cost
 
 class DQN(nn.Module):
     def __init__(self, state_size: int, action_size: int, params: RLHyperParams):
